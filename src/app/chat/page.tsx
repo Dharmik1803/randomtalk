@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, FormEvent } from "react";
-import io, { Socket } from "socket.io-client";
+import Peer, { MediaConnection, DataConnection } from "peerjs";
 import { Camera, CameraOff, Mic, MicOff, SkipForward, Search, X, Send, Flag, TriangleAlert, Video } from "lucide-react";
 
 type PermissionState = 'prompt' | 'granted' | 'denied' | 'text_only';
@@ -29,15 +29,16 @@ export default function ChatPage() {
   // References
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const socketRef = useRef<Socket | null>(null);
-  const currentRoomRef = useRef<string | null>(null);
+  
+  const peerRef = useRef<Peer | null>(null);
+  const callRef = useRef<MediaConnection | null>(null);
+  const dataConnRef = useRef<DataConnection | null>(null);
   
   const searchIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const chatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const matchPollRef = useRef<NodeJS.Timeout | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Parse URL params for Text Only mode
   useEffect(() => {
     if (typeof window !== "undefined") {
       const urlParams = new URLSearchParams(window.location.search);
@@ -48,14 +49,12 @@ export default function ChatPage() {
     
     return () => {
       stream?.getTracks().forEach((track) => track.stop());
-      socketRef.current?.disconnect();
-      peerConnectionRef.current?.close();
+      peerRef.current?.destroy();
       stopTimers();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync streams to video elements when they become available in the DOM
   useEffect(() => {
     if (localVideoRef.current && stream) {
       localVideoRef.current.srcObject = stream;
@@ -68,7 +67,6 @@ export default function ChatPage() {
     }
   }, [remoteStream, status]);
 
-  // Auto-scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -76,6 +74,7 @@ export default function ChatPage() {
   const stopTimers = () => {
     if (searchIntervalRef.current) clearInterval(searchIntervalRef.current);
     if (chatIntervalRef.current) clearInterval(chatIntervalRef.current);
+    if (matchPollRef.current) clearInterval(matchPollRef.current);
   };
 
   const startSearchTimer = () => {
@@ -101,7 +100,7 @@ export default function ChatPage() {
     setIsTextOnly(true);
     setStatus("Finding your match...");
     startSearchTimer();
-    initSocket(null, "text");
+    initPeer(null, "text");
   };
 
   const requestPermissions = async () => {
@@ -112,146 +111,133 @@ export default function ChatPage() {
       if (localVideoRef.current) localVideoRef.current.srcObject = _stream;
       setStatus("Finding your match...");
       startSearchTimer();
-      initSocket(_stream, "video");
+      initPeer(_stream, "video");
     } catch (err: any) {
       console.error("Error accessing media devices", err);
-      if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        alert("⚠️ Camera/Mic is already in use by another application. Please close other apps and refresh.");
-      }
       setPermissionState('denied');
-      handleTextOnlyMode(); // Fallback to text
+      handleTextOnlyMode();
     }
   };
 
-  const initSocket = (_stream: MediaStream | null, mode: "video" | "text") => {
-    const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin;
-    console.log(`[Chat] Connecting to Socket Server: ${socketUrl}`);
-    
-    const socket = io(socketUrl, {
-      reconnectionAttempts: 5,
-      timeout: 10000
-    });
-    socketRef.current = socket;
+  const initPeer = (_stream: MediaStream | null, mode: "video" | "text") => {
+    const peer = new Peer();
+    peerRef.current = peer;
 
-    socket.on("connect", () => {
-      console.log(`[Chat] Connected to server! ID: ${socket.id}`);
-      socket.emit("find_match", { mode });
+    peer.on("open", (id) => {
+      console.log(`[Peer] Open with ID: ${id}`);
+      findMatch(id, mode, _stream);
     });
 
-    socket.on("connect_error", (err) => {
-      console.error(`[Chat] Connection Error:`, err.message);
-      setStatus("Connection Error. Check internet/server.");
+    peer.on("call", (incomingCall) => {
+      console.log(`[Peer] Incoming call...`);
+      if (_stream) {
+        incomingCall.answer(_stream);
+      } else {
+        incomingCall.answer();
+      }
+      setupCallListeners(incomingCall);
     });
 
-    socket.on("waiting_for_match", () => {
-      setStatus("Finding your match...");
-      setMessages([]);
+    peer.on("connection", (conn) => {
+      console.log(`[Peer] Incoming data connection...`);
+      setupDataListeners(conn);
     });
 
-    socket.on("match_found", () => {
-      setStatus("Match Found!");
+    peer.on("error", (err) => {
+      console.error(`[Peer] Error:`, err);
+      setStatus("Connection Error. Refreshing...");
     });
+  };
 
-    socket.on("match_info", async (data) => {
+  const findMatch = async (id: string, mode: "video" | "text", _stream: MediaStream | null) => {
+    try {
+      const res = await fetch("/api/match", {
+        method: "POST",
+        body: JSON.stringify({ peerId: id, mode }),
+        headers: { "Content-Type": "application/json" }
+      });
+      const data = await res.json();
+
+      if (data.match && data.peerId) {
+        console.log(`[Match] Found partner: ${data.peerId}`);
+        setStatus("Connected!");
+        startChatTimer();
+        setMessages([{ id: Date.now().toString(), sender: 'system', text: "Connected! Say hi 👋" }]);
+
+        // Initiate P2P connections
+        if (mode === "video" && _stream) {
+          const outgoingCall = peerRef.current!.call(data.peerId, _stream);
+          setupCallListeners(outgoingCall);
+        }
+        
+        const conn = peerRef.current!.connect(data.peerId);
+        setupDataListeners(conn);
+        stopTimers();
+        startChatTimer();
+      } else {
+        // Poll for match
+        if (matchPollRef.current) clearInterval(matchPollRef.current);
+        matchPollRef.current = setInterval(() => findMatch(id, mode, _stream), 3000);
+      }
+    } catch (err) {
+      console.error("[Match] API Error:", err);
+    }
+  };
+
+  const setupCallListeners = (call: MediaConnection) => {
+    callRef.current = call;
+    call.on("stream", (remoteStream) => {
+      console.log(`[Peer] Received remote stream`);
+      setRemoteStream(remoteStream);
       setStatus("Connected!");
-      startChatTimer();
-      currentRoomRef.current = data.roomId;
-      setMessages([{ id: Date.now().toString(), sender: 'system', text: "Connected! Say hi 👋" }]);
-
-      if (mode === "video" && _stream) {
-        initPeerConnection(_stream, data.isInitiator, data.roomId);
-      }
     });
-
-    socket.on("message", (text) => {
-      setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'stranger', text }]);
-    });
-
-    socket.on("offer", async (offer) => {
-      if (!peerConnectionRef.current) return;
-      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await peerConnectionRef.current.createAnswer();
-      await peerConnectionRef.current.setLocalDescription(answer);
-      socket.emit("answer", { answer, roomId: currentRoomRef.current });
-    });
-
-    socket.on("answer", async (answer) => {
-      if (!peerConnectionRef.current) return;
-      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-    });
-
-    socket.on("ice_candidate", async (candidate) => {
-      if (!peerConnectionRef.current) return;
-      try {
-        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (e) {
-        console.error("Error adding received ice candidate", e);
-      }
-    });
-
-    socket.on("peer_disconnected", () => {
-      setStatus("Finding your match...");
-      setMessages([]);
-      startSearchTimer();
-      cleanupPeerConnection();
-      
-      setTimeout(() => {
-        socketRef.current?.emit("find_match", { mode });
-      }, 500);
+    call.on("close", () => {
+      handlePeerDisconnected();
     });
   };
 
-  const initPeerConnection = async (_stream: MediaStream, isInitiator: boolean, roomId: string) => {
-    const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
-    const pc = new RTCPeerConnection(configuration);
-    peerConnectionRef.current = pc;
-
-    _stream.getTracks().forEach((track) => pc.addTrack(track, _stream));
-
-    pc.ontrack = (event) => {
-      setRemoteStream(event.streams[0]);
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = event.streams[0];
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socketRef.current?.emit("ice_candidate", { candidate: event.candidate, roomId });
-      }
-    };
-
-    if (isInitiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socketRef.current?.emit("offer", { offer, roomId });
-    }
+  const setupDataListeners = (conn: DataConnection) => {
+    dataConnRef.current = conn;
+    conn.on("data", (data: any) => {
+      setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'stranger', text: data.toString() }]);
+    });
+    conn.on("close", () => {
+      handlePeerDisconnected();
+    });
   };
 
-  const cleanupPeerConnection = () => {
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
+  const handlePeerDisconnected = () => {
+    setStatus("Finding your match...");
+    setMessages([]);
     setRemoteStream(null);
-    currentRoomRef.current = null;
+    startSearchTimer();
+    
+    // Auto-restart search
+    if (peerRef.current?.id) {
+       findMatch(peerRef.current.id, isTextOnly ? "text" : "video", stream);
+    }
   };
 
   const handleNext = () => {
-    if (!socketRef.current) return;
-    setStatus("Finding your match...");
+    console.log("[Peer] Next pressed");
+    callRef.current?.close();
+    dataConnRef.current?.close();
     setMessages([]);
+    setStatus("Finding your match...");
     startSearchTimer();
-    cleanupPeerConnection();
-    socketRef.current.emit("next", { roomId: currentRoomRef.current });
-    setTimeout(() => { socketRef.current?.emit("find_match", { mode: isTextOnly ? "text" : "video" }); }, 300);
+    
+    if (peerRef.current?.id) {
+       findMatch(peerRef.current.id, isTextOnly ? "text" : "video", stream);
+    }
   };
 
   const sendMessage = (e: FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || status !== "Connected!") return;
+    if (!inputText.trim() || !dataConnRef.current) return;
     
     const newMsg: Message = { id: Date.now().toString(), sender: 'me', text: inputText };
     setMessages(prev => [...prev, newMsg]);
-    socketRef.current?.emit("message", { roomId: currentRoomRef.current, message: newMsg.text });
+    dataConnRef.current.send(inputText);
     setInputText("");
   };
 
@@ -289,17 +275,11 @@ export default function ChatPage() {
              <span className="w-2.5 h-2.5 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]"></span>
            )}
            <span className="text-sm font-medium text-zinc-200">
-             {status === "Finding your match..." ? `Searching global pool...` : 
-              status === "Match Found!" ? "Connecting..." : 
-              status.startsWith("Connection Error") ? "⚠️ Server unreachable. Check Netlify Env Vars." :
-              "Stranger from United States us"}
+             {status === "Finding your match..." ? "Searching global pool..." : 
+              status === "Connected!" ? "Stranger matched" : 
+              status}
            </span>
         </div>
-        {isTextOnly && (
-           <span className="px-2 py-0.5 rounded-full bg-orange-500/10 border border-orange-500/20 text-orange-400 text-xs font-semibold">
-             Text Only
-           </span>
-        )}
       </div>
       <div className="text-zinc-400 font-mono text-sm tracking-wider">
         {status === "Connected!" ? formatTimer(chatTimer) : formatTimer(searchTimer)}
@@ -350,14 +330,14 @@ export default function ChatPage() {
            <SkipForward className="w-5 h-5 fill-white" /> Next
          </button>
          {!isTextOnly && status === "Connected!" && (
-           <>
-             <button onClick={toggleMic} className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${isMicMuted ? 'bg-[#1a1a1d] text-zinc-500' : 'bg-zinc-800 text-white'}`}>
-               {isMicMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-             </button>
-             <button onClick={toggleCam} className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${isCamOff ? 'bg-[#1a1a1d] text-zinc-500' : 'bg-zinc-800 text-white'}`}>
-               {isCamOff ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
-             </button>
-           </>
+            <>
+              <button onClick={toggleMic} className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${isMicMuted ? 'bg-[#1a1a1d] text-zinc-500' : 'bg-zinc-800 text-white'}`}>
+                {isMicMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              </button>
+              <button onClick={toggleCam} className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${isCamOff ? 'bg-[#1a1a1d] text-zinc-500' : 'bg-zinc-800 text-white'}`}>
+                {isCamOff ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
+              </button>
+            </>
          )}
          <button className="w-12 h-12 bg-[#121214] border border-zinc-800 hover:bg-zinc-800 text-zinc-400 rounded-xl flex items-center justify-center transition">
            <Flag className="w-5 h-5" />
@@ -366,7 +346,6 @@ export default function ChatPage() {
     </div>
   );
 
-  // --- 1. PERMISSION prompt
   if (permissionState === 'prompt') {
     return (
       <div className="flex-1 flex items-center justify-center w-full min-h-screen bg-[#050505]">
@@ -389,32 +368,23 @@ export default function ChatPage() {
     );
   }
 
-  // --- 2. MATCH FOUND or LOADING
-  if (status === "Finding your match..." || status === "Match Found!") {
+  if (status === "Finding your match..." || status === "Initializing...") {
     return (
       <div className="flex flex-col w-full h-screen bg-[#050505]">
         {renderHeader()}
         <div className="flex-1 flex flex-col md:flex-row items-center justify-center p-6 gap-16">
           <div className="flex-1 flex flex-col items-center max-w-lg w-full">
-            {status === "Match Found!" ? (
-              <div className="relative w-48 h-48 flex items-center justify-center mb-8">
-                <div className="w-20 h-20 bg-green-500 rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(34,197,94,0.4)] relative z-10 border-4 border-green-400/50">
-                   <div className="w-8 h-8 rounded-full border-4 border-white border-t-transparent animate-spin"></div>
-                </div>
+            <div className="relative w-48 h-48 flex items-center justify-center mb-8">
+              <div className="absolute inset-4 rounded-full border border-cyan-500/10 animate-[ping_2.5s_linear_infinite]"></div>
+              <div className="absolute inset-10 rounded-full border border-cyan-500/20 animate-[ping_2.5s_linear_infinite_500ms]"></div>
+              <div className="absolute inset-16 rounded-full border border-cyan-500/30 animate-[ping_2.5s_linear_infinite_1000ms]"></div>
+              <div className="w-16 h-16 bg-[#121214] border border-zinc-800 rounded-full flex items-center justify-center z-10 relative">
+                <Search className="w-6 h-6 text-cyan-400 animate-pulse" />
               </div>
-            ) : (
-              <div className="relative w-48 h-48 flex items-center justify-center mb-8">
-                <div className="absolute inset-4 rounded-full border border-cyan-500/10 animate-[ping_2.5s_linear_infinite]"></div>
-                <div className="absolute inset-10 rounded-full border border-cyan-500/20 animate-[ping_2.5s_linear_infinite_500ms]"></div>
-                <div className="absolute inset-16 rounded-full border border-cyan-500/30 animate-[ping_2.5s_linear_infinite_1000ms]"></div>
-                <div className="w-16 h-16 bg-[#121214] border border-zinc-800 rounded-full flex items-center justify-center z-10 relative">
-                  <Search className="w-6 h-6 text-cyan-400 animate-pulse" />
-                </div>
-              </div>
-            )}
+            </div>
             
-            <h2 className="text-3xl font-bold mb-2 text-white tracking-tight">{status === "Match Found!" ? "Match Found!" : "Finding your match..."}</h2>
-            <p className="text-sm text-zinc-500 mb-10">{status === "Match Found!" ? "Connecting peer-to-peer..." : "Searching global pool"}</p>
+            <h2 className="text-3xl font-bold mb-2 text-white tracking-tight">Finding your match...</h2>
+            <p className="text-sm text-zinc-500 mb-10">Searching global pool</p>
 
             <div className="w-full bg-[#0a0a0a] border border-zinc-800/80 rounded-2xl p-6">
                <p className="text-[10px] font-bold text-zinc-600 tracking-widest uppercase mb-4">Filter by Interests (Optional)</p>
@@ -437,17 +407,14 @@ export default function ChatPage() {
     );
   }
 
-  // --- 3. ACTIVE CHAT
   return (
     <div className="flex flex-col w-full h-screen bg-[#050505] overflow-hidden">
       {renderHeader()}
       
       <div className="flex-1 flex flex-col md:flex-row w-full h-[calc(100vh-56px)] overflow-hidden bg-[#050505]">
         
-        {/* Main Video Area (Hidden if Text Only) */}
         {!isTextOnly && (
           <div className="flex-[2] flex flex-col relative bg-black border-r border-zinc-900">
-            {/* Remote Video */}
             <div className="absolute inset-0 flex items-center justify-center">
                {!remoteStream && (
                  <div className="w-20 h-20 rounded-full bg-[#121214] border border-zinc-800 flex items-center justify-center">
@@ -457,7 +424,6 @@ export default function ChatPage() {
                <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
             </div>
 
-            {/* PIP Local Video */}
             <div className="absolute top-4 right-4 w-1/4 max-w-[200px] aspect-video bg-[#121214] rounded-xl overflow-hidden shadow-2xl border border-zinc-800 z-20">
               <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover transform scale-x-[-1]" />
               <div className="absolute bottom-2 left-2 bg-black/50 backdrop-blur px-2 py-0.5 rounded text-[10px] text-zinc-300 font-medium tracking-wide">You</div>
@@ -467,25 +433,7 @@ export default function ChatPage() {
           </div>
         )}
 
-        {/* Text Mode Active Ads Area (Top Center if full screen) */}
-        {isTextOnly && (
-          <div className="absolute top-0 left-0 right-0 p-4 shrink-0 flex flex-col items-center justify-center z-10 pointer-events-none">
-             <div className="w-full max-w-sm h-28 border border-zinc-800 bg-[#0a0a0a] rounded-2xl flex flex-col items-center justify-center text-xs text-zinc-600 pointer-events-auto shadow-xl">
-               <span className="font-semibold tracking-widest uppercase mb-1">Advertisement</span>
-               <span>medium rectangle</span>
-             </div>
-             {permissionState === 'denied' && (
-               <div className="mt-4 flex items-center gap-2 text-xs font-semibold text-yellow-500/80 bg-yellow-500/10 px-4 py-1.5 rounded-full border border-yellow-500/20 pointer-events-auto">
-                 <TriangleAlert className="w-4 h-4" /> Text only — camera/mic access denied
-               </div>
-             )}
-          </div>
-        )}
-
-        {/* Sidebar / Chat Log */}
         <div className={`flex flex-col bg-[#050505] relative ${isTextOnly ? 'flex-1 pt-44 max-w-3xl mx-auto w-full border-x border-zinc-900' : 'flex-1 w-full max-w-[400px]'}`}>
-          
-          {/* Top Ad in Video Mode Sidebar */}
           {!isTextOnly && (
              <div className="p-4 flex-none border-b border-zinc-900 bg-[#0a0a0a]">
                 <div className="w-full aspect-video border border-zinc-800 bg-[#121214] rounded-xl flex flex-col items-center justify-center text-xs text-zinc-600">
