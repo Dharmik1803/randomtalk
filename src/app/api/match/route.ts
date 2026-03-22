@@ -3,6 +3,12 @@ import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
   try {
+    if (!redis) {
+      return NextResponse.json({ 
+        error: "REDIS_URL is missing or invalid. Please set it in your deployment settings." 
+      }, { status: 503 });
+    }
+
     const { peerId, mode = "video" } = await req.json();
     if (!peerId) return NextResponse.json({ error: "Missing peerId" }, { status: 400 });
 

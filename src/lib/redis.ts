@@ -2,8 +2,17 @@ import Redis from "ioredis";
 
 const redisUrl = process.env.REDIS_URL;
 
-if (!redisUrl) {
-  throw new Error("⚠️ REDIS_URL environment variable is missing!");
+let redis: Redis | null = null;
+
+if (redisUrl) {
+  try {
+    redis = new Redis(redisUrl, {
+      maxRetriesPerRequest: 3,
+      connectTimeout: 10000,
+    });
+  } catch (err) {
+    console.error("Redis Connection Error:", err);
+  }
 }
 
-export const redis = new Redis(redisUrl);
+export { redis };
