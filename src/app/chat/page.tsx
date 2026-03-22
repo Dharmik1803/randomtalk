@@ -134,6 +134,7 @@ export default function ChatPage() {
 
     peer.on("open", (id) => {
       console.log(`[Peer] Open with ID: ${id}`);
+      setStatus("Searching global pool...");
       findMatch(id, mode, _stream);
     });
 
