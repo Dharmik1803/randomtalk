@@ -138,8 +138,10 @@ export default function ChatPage() {
     });
 
     peer.on("call", (incomingCall) => {
-      console.log(`[Peer] Incoming call...`);
-      if (matchPollRef.current) clearInterval(matchPollRef.current); // STOP POLLING
+      console.log(`[Peer] Incoming call from peer!`);
+      setStatus("Match Found!");
+      if (matchPollRef.current) clearInterval(matchPollRef.current);
+      
       if (_stream) {
         incomingCall.answer(_stream);
       } else {
@@ -149,8 +151,9 @@ export default function ChatPage() {
     });
 
     peer.on("connection", (conn) => {
-      console.log(`[Peer] Incoming data connection...`);
-      if (matchPollRef.current) clearInterval(matchPollRef.current); // STOP POLLING
+      console.log(`[Peer] Incoming data connection from peer!`);
+      setStatus("Match Found!");
+      if (matchPollRef.current) clearInterval(matchPollRef.current);
       setupDataListeners(conn);
     });
 
@@ -170,25 +173,31 @@ export default function ChatPage() {
       const data = await res.json();
 
       if (data.match && data.peerId) {
-        console.log(`[Match] Found partner: ${data.peerId}`);
-        setStatus("Connected!");
-        startChatTimer();
-        setMessages([{ id: Date.now().toString(), sender: 'system', text: "Connected! Say hi 👋" }]);
-
+        console.log(`[Match] Match found for ${id} with partner: ${data.peerId}`);
+        if (matchPollRef.current) clearInterval(matchPollRef.current);
+        setStatus("Match Found!");
+        
         // Initiate P2P connections
         if (mode === "video" && _stream) {
+          console.log(`[Peer] Calling ${data.peerId}...`);
           const outgoingCall = peerRef.current!.call(data.peerId, _stream);
           setupCallListeners(outgoingCall);
         }
         
+        console.log(`[Peer] Connecting data to ${data.peerId}...`);
         const conn = peerRef.current!.connect(data.peerId);
         setupDataListeners(conn);
-        stopTimers();
-        startChatTimer();
+        
+        setTimeout(() => {
+          setStatus("Connected!");
+          startChatTimer();
+          setMessages([{ id: Date.now().toString(), sender: 'system', text: "Connected! Say hi 👋" }]);
+        }, 1500); // Give PeerJS a moment to handshake
       } else {
-        // Poll for match
-        if (matchPollRef.current) clearInterval(matchPollRef.current);
-        matchPollRef.current = setInterval(() => findMatch(id, mode, _stream), 3000);
+        console.log(`[Match] No partner found yet, polling...`);
+        if (!matchPollRef.current) {
+          matchPollRef.current = setInterval(() => findMatch(id, mode, _stream), 3000);
+        }
       }
     } catch (err) {
       console.error("[Match] API Error:", err);
