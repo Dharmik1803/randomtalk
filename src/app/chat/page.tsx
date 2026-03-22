@@ -125,11 +125,22 @@ export default function ChatPage() {
 
   const initSocket = (_stream: MediaStream | null, mode: "video" | "text") => {
     const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin;
-    const socket = io(socketUrl);
+    console.log(`[Chat] Connecting to Socket Server: ${socketUrl}`);
+    
+    const socket = io(socketUrl, {
+      reconnectionAttempts: 5,
+      timeout: 10000
+    });
     socketRef.current = socket;
 
     socket.on("connect", () => {
+      console.log(`[Chat] Connected to server! ID: ${socket.id}`);
       socket.emit("find_match", { mode });
+    });
+
+    socket.on("connect_error", (err) => {
+      console.error(`[Chat] Connection Error:`, err.message);
+      setStatus("Connection Error. Check internet/server.");
     });
 
     socket.on("waiting_for_match", () => {
@@ -278,8 +289,9 @@ export default function ChatPage() {
              <span className="w-2.5 h-2.5 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]"></span>
            )}
            <span className="text-sm font-medium text-zinc-200">
-             {status === "Finding your match..." ? "Searching global pool" : 
+             {status === "Finding your match..." ? `Searching global pool...` : 
               status === "Match Found!" ? "Connecting..." : 
+              status.startsWith("Connection Error") ? "⚠️ Server unreachable. Check Netlify Env Vars." :
               "Stranger from United States us"}
            </span>
         </div>
