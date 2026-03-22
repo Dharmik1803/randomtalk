@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: randomtalk-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run socket-start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value: https://sage-sorbet-c71b9c.netlify.app
+      - key: REDIS_URL
+        sync: false # User must provide this from Upstash
