@@ -1,27 +1,34 @@
-import { Redis } from "@upstash/redis";
+import { createClient } from "redis";
 
-let redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_URL;
-const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+const redisUrl = process.env.REDIS_URL;
 
-let redis: Redis | null = null;
+// Type definition for global to persist Redis client in development (HMR)
+declare global {
+  var redisClient: ReturnType<typeof createClient> | undefined;
+}
 
-if (redisUrl && redisToken) {
-  // Ensure the URL starts with https:// for the HTTP client
-  if (redisUrl.startsWith("redis://") || redisUrl.startsWith("rediss://")) {
-    console.warn("⚠️ [Redis] You provided a redis:// URL to a serverless HTTP client. Attempting to convert to https://...");
-    redisUrl = redisUrl.replace("redis://", "https://").replace("rediss://", "https://");
+let redis: ReturnType<typeof createClient> | null = null;
+
+if (redisUrl) {
+  if (!global.redisClient) {
+    console.log("[Redis] Initializing node-redis client...");
+    const client = createClient({
+      url: redisUrl,
+    });
+
+    client.on("error", (err) => console.error("[Redis] Client Error:", err));
+    
+    // Connect asynchronously
+    client.connect().catch((err) => {
+      console.error("[Redis] Connection Error:", err);
+    });
+
+    global.redisClient = client;
   }
   
-  if (!redisUrl.startsWith("http")) {
-    redisUrl = `https://${redisUrl}`;
-  }
-
-  console.log(`[Redis] Initializing HTTP client with URL: ${redisUrl.split('@').pop()}`);
-  
-  redis = new Redis({
-    url: redisUrl,
-    token: redisToken,
-  });
-} 
+  redis = global.redisClient;
+} else {
+  console.warn("⚠️ [Redis] REDIS_URL not found in environment variables.");
+}
 
 export { redis };
