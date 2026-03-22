@@ -8,21 +8,23 @@ export async function POST(req: Request) {
 
     const queueKey = `queue:${mode}`;
     
+    // Remove self from queue in case of stale entry
+    await redis.lrem(queueKey, 0, peerId);
+
     // Try to pop a waiting peer
     const matchedPeerId = await redis.lpop(queueKey);
 
     if (matchedPeerId && matchedPeerId !== peerId) {
-      // Found a match! Return the peerId
+      // Found a match!
       return NextResponse.json({ 
         match: true, 
         peerId: matchedPeerId,
-        isInitiator: true // Current user will initiate the call
       });
     }
 
     // No match found, add current user to the queue
     await redis.rpush(queueKey, peerId);
-    await redis.expire(queueKey, 30); // 30s TTL for self-cleanup
+    await redis.expire(queueKey, 10); // Short 10s TTL for fast cleanup
 
     return NextResponse.json({ 
       match: false, 

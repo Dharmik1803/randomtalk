@@ -120,7 +120,16 @@ export default function ChatPage() {
   };
 
   const initPeer = (_stream: MediaStream | null, mode: "video" | "text") => {
-    const peer = new Peer();
+    // Basic STUN configuration for better connectivity
+    const peer = new Peer({
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
+        ]
+      }
+    });
     peerRef.current = peer;
 
     peer.on("open", (id) => {
@@ -130,6 +139,7 @@ export default function ChatPage() {
 
     peer.on("call", (incomingCall) => {
       console.log(`[Peer] Incoming call...`);
+      if (matchPollRef.current) clearInterval(matchPollRef.current); // STOP POLLING
       if (_stream) {
         incomingCall.answer(_stream);
       } else {
@@ -140,6 +150,7 @@ export default function ChatPage() {
 
     peer.on("connection", (conn) => {
       console.log(`[Peer] Incoming data connection...`);
+      if (matchPollRef.current) clearInterval(matchPollRef.current); // STOP POLLING
       setupDataListeners(conn);
     });
 
