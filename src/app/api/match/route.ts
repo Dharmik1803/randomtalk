@@ -5,9 +5,12 @@ export async function POST(req: Request) {
   console.log("[API] Incoming match request...");
   try {
     if (!redis) {
-      console.error("[API] Redis client NOT initialized. Check REDIS_URL.");
+      const missing = [];
+      if (!process.env.UPSTASH_REDIS_REST_URL && !process.env.REDIS_URL) missing.push("URL");
+      if (!process.env.UPSTASH_REDIS_REST_TOKEN) missing.push("TOKEN");
+      
       return NextResponse.json({ 
-        error: "REDIS_URL is missing or invalid. Please set it in your deployment settings." 
+        error: `Missing Upstash Redis ${missing.join(" and ")}. Please add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN to your environment variables.` 
       }, { status: 503 });
     }
 
