@@ -1,0 +1,43 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  ipHash    String   @unique
+  isBanned  Boolean  @default(false)
+  reports   Report[]
+  createdAt DateTime @default(now())
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  userId    String
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+}
+
+model Report {
+  id          String   @id @default(uuid())
+  reporterId  String
+  reportedId  String
+  reason      String
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [reportedId], references: [id])
+}
+
+model Ban {
+  id        String   @id @default(uuid())
+  ipHash    String   @unique
+  reason    String
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+}
