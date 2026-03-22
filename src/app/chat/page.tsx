@@ -173,6 +173,12 @@ export default function ChatPage() {
       });
       const data = await res.json();
 
+      if (!res.ok) {
+        setStatus(`Error: ${data.error || "Failed searching"}`);
+        if (data.details) console.error("[Match] API Detail:", data.details);
+        return;
+      }
+
       if (data.match && data.peerId) {
         console.log(`[Match] Match found for ${id} with partner: ${data.peerId}`);
         if (matchPollRef.current) clearInterval(matchPollRef.current);
@@ -200,8 +206,9 @@ export default function ChatPage() {
           matchPollRef.current = setInterval(() => findMatch(id, mode, _stream), 3000);
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("[Match] API Error:", err);
+      setStatus(`Network Error: ${err.message || "Unknown error"}`);
     }
   };
 
